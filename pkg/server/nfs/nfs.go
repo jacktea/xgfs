@@ -11,6 +11,7 @@ import (
 	nfshelper "github.com/willscott/go-nfs/helpers"
 
 	"github.com/jacktea/xgfs/pkg/fs"
+	"github.com/jacktea/xgfs/pkg/vfs"
 )
 
 // Options control the exported NFS service.
@@ -21,13 +22,20 @@ type Options struct {
 	HandleCache int
 }
 
+// Filesystem couples fs.Fs with the POSIX methods NFS relies on. Provide a
+// vfs.FS (or compatible adapter) when calling Serve.
+type Filesystem interface {
+	fs.Fs
+	vfs.PosixFs
+}
+
 // Serve exposes filesystem over NFS at addr using default options.
-func Serve(ctx context.Context, filesystem fs.Fs, addr string) error {
+func Serve(ctx context.Context, filesystem Filesystem, addr string) error {
 	return ServeWithOptions(ctx, filesystem, addr, Options{})
 }
 
 // ServeWithOptions exposes filesystem over NFS with custom options.
-func ServeWithOptions(ctx context.Context, filesystem fs.Fs, addr string, opts Options) error {
+func ServeWithOptions(ctx context.Context, filesystem Filesystem, addr string, opts Options) error {
 	if filesystem == nil {
 		return fmt.Errorf("nfs: filesystem is required")
 	}

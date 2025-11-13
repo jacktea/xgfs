@@ -16,6 +16,7 @@ import (
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/localfs"
 	"github.com/jacktea/xgfs/pkg/server/middleware"
+	"github.com/jacktea/xgfs/pkg/vfs"
 )
 
 func TestHTTPAPIPutAndGet(t *testing.T) {
@@ -24,7 +25,7 @@ func TestHTTPAPIPutAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	srv := &Server{FS: backend}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{})}
 	handler := srv.router()
 	req := httptest.NewRequest(http.MethodPut, "/files/test.txt", bytes.NewBufferString("hello"))
 	rr := httptest.NewRecorder()
@@ -50,7 +51,7 @@ func TestHTTPAPIAuthMiddleware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	srv := &Server{FS: backend, Opts: Options{APIKey: "secret"}}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{}), Opts: Options{APIKey: "secret"}}
 	handler := srv.router()
 	req := httptest.NewRequest(http.MethodGet, "/dirs/", nil)
 	rr := httptest.NewRecorder()
@@ -82,7 +83,7 @@ func TestHTTPAPIRateLimit(t *testing.T) {
 			},
 		},
 	}
-	srv := &Server{FS: backend, Opts: opts}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{}), Opts: opts}
 	handler := srv.router()
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rr := httptest.NewRecorder()
@@ -119,7 +120,7 @@ func TestHTTPAPIPagination(t *testing.T) {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-	srv := &Server{FS: backend}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{})}
 	handler := srv.router()
 	req := httptest.NewRequest(http.MethodGet, "/dirs/?limit=2", nil)
 	rr := httptest.NewRecorder()
@@ -168,7 +169,7 @@ func TestHTTPAPIPatchRename(t *testing.T) {
 	if _, err := obj.Write(ctx, bytes.NewBufferString("data"), fs.IOOptions{}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	srv := &Server{FS: backend}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{})}
 	payload := `{"rename_to":"/new.txt"}`
 	req := httptest.NewRequest(http.MethodPatch, "/files/old.txt", strings.NewReader(payload))
 	rr := httptest.NewRecorder()
@@ -197,7 +198,7 @@ func TestHTTPAPIPatchChmod(t *testing.T) {
 	if _, err := obj.Write(ctx, bytes.NewBufferString("data"), fs.IOOptions{}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	srv := &Server{FS: backend}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{})}
 	payload := fmt.Sprintf(`{"mode":%d}`, 0o600)
 	req := httptest.NewRequest(http.MethodPatch, "/files/perm.txt", strings.NewReader(payload))
 	rr := httptest.NewRecorder()
@@ -220,7 +221,7 @@ func TestHTTPAPIMkfifo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	srv := &Server{FS: backend}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{})}
 	payload := fmt.Sprintf(`{"type":"fifo","mode":%d}`, 0o770)
 	req := httptest.NewRequest(http.MethodPost, "/files/fifo.pipe", strings.NewReader(payload))
 	rr := httptest.NewRecorder()

@@ -3,6 +3,7 @@ package s3gw
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/server/middleware"
+	"github.com/jacktea/xgfs/pkg/vfs"
 )
 
 // Options configure the S3 gateway.
@@ -23,9 +25,16 @@ type Options struct {
 	MaxKeys   int
 }
 
-// Server exposes a tiny subset of the S3 API backed by fs.Fs.
+// Filesystem combines fs.Fs semantics with POSIX extensions expected by S3
+// metadata/rename endpoints.
+type Filesystem interface {
+	fs.Fs
+	vfs.PosixFs
+}
+
+// Server exposes a tiny subset of the S3 API backed by Filesystem.
 type Server struct {
-	FS  fs.Fs
+	FS  Filesystem
 	Opt Options
 
 	handlerOnce sync.Once
@@ -139,15 +148,15 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request) {
 	key := s.objectKey(r.URL.Path)
 	obj, err := s.FS.Create(r.Context(), key, fs.CreateOptions{Mode: 0o644, Overwrite: true})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), statusFromError(err))
 		return
 	}
 	if _, err := obj.Write(r.Context(), r.Body, fs.IOOptions{}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), statusFromError(err))
 		return
 	}
 	if err := s.applyObjectMetadata(r.Context(), key, r); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), statusFromError(err))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -156,7 +165,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request) {
 	key := s.objectKey(r.URL.Path)
 	if err := s.FS.Remove(r.Context(), key, fs.RemoveOptions{}); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), statusFromError(err))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -230,14 +239,10 @@ func (s *Server) maxKeys() int {
 }
 
 func (s *Server) applyObjectMetadata(ctx context.Context, path string, r *http.Request) error {
-	posix, ok := s.FS.(fs.PosixFs)
-	if !ok {
-		return nil
-	}
 	modeHeader := r.Header.Get("X-Amz-Meta-Posix-Mode")
 	uidHeader := r.Header.Get("X-Amz-Meta-Posix-Uid")
 	gidHeader := r.Header.Get("X-Amz-Meta-Posix-Gid")
-	var changes fs.AttrChanges
+	var changes vfs.AttrChanges
 	if modeHeader != "" {
 		value, err := strconv.ParseUint(modeHeader, 8, 32)
 		if err != nil {
@@ -265,16 +270,11 @@ func (s *Server) applyObjectMetadata(ctx context.Context, path string, r *http.R
 	if changes.Mode == nil && changes.UID == nil && changes.GID == nil {
 		return nil
 	}
-	user := fs.User{}
-	return posix.SetAttr(ctx, path, changes, user)
+	user := vfs.User{}
+	return s.FS.SetAttr(ctx, path, changes, user)
 }
 
 func (s *Server) postObject(w http.ResponseWriter, r *http.Request) {
-	posix, ok := s.FS.(fs.PosixFs)
-	if !ok {
-		http.Error(w, "posix operations not supported", http.StatusNotImplemented)
-		return
-	}
 	renameTo := r.URL.Query().Get("rename")
 	if renameTo == "" {
 		http.Error(w, "missing rename target", http.StatusBadRequest)
@@ -282,9 +282,24 @@ func (s *Server) postObject(w http.ResponseWriter, r *http.Request) {
 	}
 	src := s.objectKey(r.URL.Path)
 	dst := s.objectKey(renameTo)
-	if err := posix.Rename(r.Context(), src, dst, fs.RenameOptions{}, fs.User{}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err := s.FS.Rename(r.Context(), src, dst, vfs.RenameOptions{}, vfs.User{}); err != nil {
+		http.Error(w, err.Error(), statusFromError(err))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func statusFromError(err error) int {
+	switch {
+	case err == nil:
+		return http.StatusOK
+	case errors.Is(err, fs.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, fs.ErrAlreadyExist):
+		return http.StatusConflict
+	case errors.Is(err, fs.ErrNotSupported):
+		return http.StatusNotImplemented
+	default:
+		return http.StatusInternalServerError
+	}
 }

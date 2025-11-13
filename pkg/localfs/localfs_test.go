@@ -13,6 +13,7 @@ import (
 
 	"github.com/jacktea/xgfs/pkg/blob"
 	"github.com/jacktea/xgfs/pkg/fs"
+	"github.com/jacktea/xgfs/pkg/vfs"
 )
 
 func TestLocalFsCreateAndRead(t *testing.T) {
@@ -180,20 +181,21 @@ func TestLocalFsLockUnlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	user := fs.User{UID: 1000, GID: 1000}
-	if err := backend.Lock(ctx, "/foo", fs.LockOptions{Exclusive: true}, user); err != nil {
+	user := vfs.User{UID: 1000, GID: 1000}
+	posix := backend.PosixAdapter()
+	if err := posix.Lock(ctx, "/foo", vfs.LockOptions{Exclusive: true}, user); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	if err := backend.Lock(ctx, "/foo", fs.LockOptions{}, user); err != nil {
+	if err := posix.Lock(ctx, "/foo", vfs.LockOptions{}, user); err != nil {
 		t.Fatalf("reentrant lock: %v", err)
 	}
-	if err := backend.Unlock(ctx, "/foo", fs.LockOptions{}, user); err != nil {
+	if err := posix.Unlock(ctx, "/foo", vfs.LockOptions{}, user); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
-	if err := backend.Unlock(ctx, "/foo", fs.LockOptions{}, user); err != nil {
+	if err := posix.Unlock(ctx, "/foo", vfs.LockOptions{}, user); err != nil {
 		t.Fatalf("unlock final: %v", err)
 	}
-	if err := backend.Unlock(ctx, "/foo", fs.LockOptions{}, user); err == nil {
+	if err := posix.Unlock(ctx, "/foo", vfs.LockOptions{}, user); err == nil {
 		t.Fatalf("expected error unlocking free lock")
 	}
 }
@@ -217,7 +219,7 @@ func TestLocalFsRenameDirectory(t *testing.T) {
 	if _, err := obj.Write(ctx, bytes.NewBufferString("data"), fs.IOOptions{}); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	posix := backend
+	posix := backend.PosixAdapter()
 	rootInode, err := backend.store.Root(ctx)
 	if err != nil {
 		t.Fatalf("root: %v", err)
@@ -227,7 +229,7 @@ func TestLocalFsRenameDirectory(t *testing.T) {
 		t.Fatalf("child dir: %v", err)
 	}
 	t.Logf("before parents: %+v", beforeDir.Parents)
-	if err := posix.Rename(ctx, "/dir", "/dir2", fs.RenameOptions{}, fs.User{}); err != nil {
+	if err := posix.Rename(ctx, "/dir", "/dir2", vfs.RenameOptions{}, vfs.User{}); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	afterDir, err := backend.child(ctx, rootInode.ID, "dir2")

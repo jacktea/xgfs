@@ -14,6 +14,7 @@ import (
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/localfs"
 	"github.com/jacktea/xgfs/pkg/server/middleware"
+	"github.com/jacktea/xgfs/pkg/vfs"
 )
 
 func TestS3GatewayPutGet(t *testing.T) {
@@ -22,7 +23,7 @@ func TestS3GatewayPutGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	srv := &Server{FS: backend, Opt: Options{Bucket: "test"}}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{}), Opt: Options{Bucket: "test"}}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/hello.txt", bytes.NewBufferString("world"))
 	srv.ServeHTTP(rr, req)
@@ -47,7 +48,7 @@ func TestS3GatewayAuthMiddleware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	srv := &Server{FS: backend, Opt: Options{Bucket: "test", APIKey: "secret"}}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{}), Opt: Options{Bucket: "test", APIKey: "secret"}}
 	req := httptest.NewRequest(http.MethodGet, "/?list-type=2", nil)
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
@@ -70,7 +71,7 @@ func TestS3GatewayRateLimit(t *testing.T) {
 	}
 	now := time.Unix(0, 0)
 	srv := &Server{
-		FS: backend,
+		FS: vfs.New(backend, vfs.Options{}),
 		Opt: Options{
 			Bucket: "test",
 			RateLimit: middleware.RateLimitOptions{
@@ -107,7 +108,7 @@ func TestS3GatewayPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	srv := &Server{FS: backend, Opt: Options{Bucket: "test"}}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{}), Opt: Options{Bucket: "test"}}
 	put := func(name string) {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPut, "/"+name, bytes.NewBufferString(name))
@@ -152,7 +153,7 @@ func TestS3GatewayPosixMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	srv := &Server{FS: backend, Opt: Options{Bucket: "test"}}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{}), Opt: Options{Bucket: "test"}}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/meta.txt", bytes.NewBufferString("posix"))
 	req.Header.Set("X-Amz-Meta-Posix-Mode", "600")
@@ -185,7 +186,7 @@ func TestS3GatewayRename(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	srv := &Server{FS: backend, Opt: Options{Bucket: "test"}}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{}), Opt: Options{Bucket: "test"}}
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, "/old.txt", bytes.NewBufferString("data"))
 	srv.ServeHTTP(rr, req)

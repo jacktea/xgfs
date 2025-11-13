@@ -1,4 +1,4 @@
-package fs
+package vfs
 
 import "context"
 
@@ -11,7 +11,7 @@ func NewContextWithUser(ctx context.Context, user User) context.Context {
 	return context.WithValue(ctx, userKey, user)
 }
 
-// UserFromContext extracts fs.User from ctx, falling back to UID/GID 0.
+// UserFromContext extracts vfs.User from ctx, falling back to UID/GID 0.
 func UserFromContext(ctx context.Context) User {
 	if ctx == nil {
 		return User{}

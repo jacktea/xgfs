@@ -1,7 +1,8 @@
 # POSIX Filesystem Overhaul
 
-This document captures the Phase 1 design for extending `github.com/jacktea/xgfs/pkg/fs`
-to a full POSIX contract, reworking metadata storage on top of BoltDB/Badger, and paving
+This document captures the Phase 1 design for layering `github.com/jacktea/xgfs/pkg/vfs`
+on top of the backend contracts in `pkg/fs`, reworking metadata storage on top of BoltDB/Badger,
+and paving
 the way for protocol adapters (CLI/FUSE/HTTP/S3/NFS) to expose the new semantics.
 
 ## Goals
@@ -16,7 +17,7 @@ the way for protocol adapters (CLI/FUSE/HTTP/S3/NFS) to expose the new semantics
 4. Windows remains future work; design choices note the required shims but implementation
    focuses on Unix semantics.
 
-## Expanded `fs` Contract
+## Expanded `vfs` Contract
 
 The current interface (stat/create/mkdir/remove/list/link/copy) is insufficient. We will add:
 
@@ -44,6 +45,18 @@ New supporting types:
 
 All existing fs implementations embed the new interface in phases: Phase 1 introduces
 the types, Phase 2 wires them through `localfs`.
+
+### Wrapper (`vfs.FS`) and Options
+
+- `vfs.New(fs.Fs, vfs.Options)` is the canonical entry point frontends should use. The wrapper
+  satisfies both `fs.Fs` and `vfs.PosixFs`, forwarding to the backend today and eventually
+  injecting caching, hybrid mirroring behaviour, and POSIX emulation.
+- `vfs.Options.PassthroughOnly` (added in Phase 2) documents that we currently just return
+  `fs.ErrNotSupported` when the backend lacks native POSIX support; future revisions will
+  toggle shims/heuristics instead of hard failures.
+- Backends such as `localfs` expose `vfs.PosixProvider` to hand `vfs` a native adapter
+  without forcing the backend type itself to satisfy `PosixFs`; this keeps storage-layer
+  APIs minimal while still surfacing richer capabilities.
 
 ## Metadata Model
 
@@ -84,13 +97,20 @@ workload). Badger equivalent uses managed transactions.
 
 ## Permissions and Users
 
-- Each request carries a `fs.User` obtained from the calling frontend (CLI inherits real UID,
-  HTTP/NFS supply it in headers or RPC auth). The context key `fs.UserContextKey` will embed
-  it.
+- Each request carries a `vfs.User` obtained from the calling frontend (CLI inherits real UID,
+  HTTP/NFS supply it in headers or RPC auth). The helper `vfs.NewContextWithUser` embeds
+  it into contexts consumed by the frontends/backends.
 - Permission checks happen in `localfs` before metadata mutation: owner/group/other bits,
   sticky bit (on directories), setuid/setgid semantics (only recorded, not executed).
+- `vfs.FS.Access` now enforces owner/group/other semantics on top of backend metadata so
+  frontends observe consistent permission errors even when backends shortcut enforcement. The
+  same helper is applied before `Rename` (write+exec on parent directories) and `SetAttr`
+  (owner-or-root) so mutating operations no longer rely on backend-specific checks.
+- Metadata lookups are cached in-memory (`vfs.Options.MetadataCacheSize/TTL`) so repeated
+  permission checks for the same paths do not thrash backends; mutating operations eagerly
+  invalidate affected paths so cached entries never go stale.
 - Superuser (uid=0) bypasses checks except sticky-bit unlink restrictions.
-- Supplementary groups enable shared directories; `fs.User` holds `[]uint32`.
+- Supplementary groups enable shared directories; `vfs.User` holds `[]uint32`.
 - `Access(path, mode, user)` is exposed for CLI `test -w` style queries and NFS ACCESS RPC.
 
 ## Special Files and Locks

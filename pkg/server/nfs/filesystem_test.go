@@ -11,16 +11,17 @@ import (
 
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/localfs"
+	"github.com/jacktea/xgfs/pkg/vfs"
 )
 
 func newTestFS(t *testing.T) *filesystem {
 	t.Helper()
-	ctx := context.Background()
+	ctx := vfs.NewContextWithUser(context.Background(), vfs.User{UID: 0})
 	backend, err := localfs.New(ctx, localfs.Config{BlobRoot: t.TempDir(), CacheEntries: 8})
 	if err != nil {
 		t.Fatalf("new backend: %v", err)
 	}
-	bfs, err := newFilesystem(ctx, backend, "/")
+	bfs, err := newFilesystem(ctx, vfs.New(backend, vfs.Options{}), "/")
 	if err != nil {
 		t.Fatalf("new filesystem: %v", err)
 	}

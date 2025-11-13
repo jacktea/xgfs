@@ -95,7 +95,7 @@ func (p *PathStore) Put(ctx context.Context, r io.Reader, size int64, opts PutOp
 	if _, err := os.Stat(finalPath); err == nil {
 		os.Remove(tmpName)
 		return ID(blade), bytesWritten, nil
-	} else if err != nil && !os.IsNotExist(err) {
+	} else if !os.IsNotExist(err) {
 		os.Remove(tmpName)
 		return "", 0, err
 	}

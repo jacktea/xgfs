@@ -14,11 +14,20 @@ import (
 
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/server/middleware"
+	"github.com/jacktea/xgfs/pkg/vfs"
 )
 
-// Server exposes fs.Fs over a simple HTTP+JSON API.
+// Filesystem combines the base fs.Fs surface with POSIX extensions. Callers
+// should supply a vfs.FS (or equivalent adapter) so HTTP operations never have
+// to guess whether rename/chmod/mkfifo exist.
+type Filesystem interface {
+	fs.Fs
+	vfs.PosixFs
+}
+
+// Server exposes Filesystem over a simple HTTP+JSON API.
 type Server struct {
-	FS   fs.Fs
+	FS   Filesystem
 	Log  *log.Logger
 	Opts Options
 }
@@ -169,6 +178,8 @@ func httpError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case fs.ErrAlreadyExist:
 		status = http.StatusConflict
+	case fs.ErrNotSupported:
+		status = http.StatusNotImplemented
 	}
 	http.Error(w, err.Error(), status)
 }
@@ -188,11 +199,6 @@ type fifoPayload struct {
 }
 
 func (s *Server) patchFile(ctx context.Context, w http.ResponseWriter, r *http.Request, p string) {
-	posix, ok := s.FS.(fs.PosixFs)
-	if !ok {
-		http.Error(w, "POSIX operations not supported", http.StatusNotImplemented)
-		return
-	}
 	var payload attrPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
@@ -201,14 +207,14 @@ func (s *Server) patchFile(ctx context.Context, w http.ResponseWriter, r *http.R
 	user := userFromRequest(r)
 	if payload.RenameTo != "" {
 		target := cleanPath(payload.RenameTo)
-		if err := posix.Rename(ctx, p, target, fs.RenameOptions{}, user); err != nil {
+		if err := s.FS.Rename(ctx, p, target, vfs.RenameOptions{}, user); err != nil {
 			httpError(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	changes := fs.AttrChanges{}
+	changes := vfs.AttrChanges{}
 	if payload.Mode != nil {
 		mode := os.FileMode(*payload.Mode)
 		changes.Mode = &mode
@@ -237,7 +243,7 @@ func (s *Server) patchFile(ctx context.Context, w http.ResponseWriter, r *http.R
 		http.Error(w, "no attributes to update", http.StatusBadRequest)
 		return
 	}
-	if err := posix.SetAttr(ctx, p, changes, user); err != nil {
+	if err := s.FS.SetAttr(ctx, p, changes, user); err != nil {
 		httpError(w, err)
 		return
 	}
@@ -245,11 +251,6 @@ func (s *Server) patchFile(ctx context.Context, w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) postFile(ctx context.Context, w http.ResponseWriter, r *http.Request, p string) {
-	posix, ok := s.FS.(fs.PosixFs)
-	if !ok {
-		http.Error(w, "POSIX operations not supported", http.StatusNotImplemented)
-		return
-	}
 	var payload fifoPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
@@ -261,7 +262,7 @@ func (s *Server) postFile(ctx context.Context, w http.ResponseWriter, r *http.Re
 		if payload.Mode != nil {
 			mode = os.FileMode(*payload.Mode)
 		}
-		if err := posix.Mkfifo(ctx, p, mode, userFromRequest(r)); err != nil {
+		if err := s.FS.Mkfifo(ctx, p, mode, userFromRequest(r)); err != nil {
 			httpError(w, err)
 			return
 		}
@@ -271,8 +272,8 @@ func (s *Server) postFile(ctx context.Context, w http.ResponseWriter, r *http.Re
 	}
 }
 
-func userFromRequest(r *http.Request) fs.User {
-	var user fs.User
+func userFromRequest(r *http.Request) vfs.User {
+	var user vfs.User
 	if uidStr := r.Header.Get("X-User-Uid"); uidStr != "" {
 		if uid, err := strconv.ParseUint(uidStr, 10, 32); err == nil {
 			user.UID = uint32(uid)

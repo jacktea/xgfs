@@ -17,15 +17,21 @@ import (
 	billy "github.com/go-git/go-billy/v5"
 
 	"github.com/jacktea/xgfs/pkg/fs"
+	"github.com/jacktea/xgfs/pkg/vfs"
 )
 
 type filesystem struct {
 	ctx  context.Context
-	back fs.Fs
+	back posixFilesystem
 	root string
 }
 
-func newFilesystem(ctx context.Context, backend fs.Fs, export string) (billy.Filesystem, error) {
+type posixFilesystem interface {
+	fs.Fs
+	vfs.PosixFs
+}
+
+func newFilesystem(ctx context.Context, backend posixFilesystem, export string) (billy.Filesystem, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -98,24 +104,7 @@ func (f *filesystem) Rename(oldpath, newpath string) error {
 	if err != nil {
 		return err
 	}
-	if posix, ok := f.back.(fs.PosixFs); ok {
-		return translateErr(posix.Rename(f.ctx, oldFull, newFull, fs.RenameOptions{}, fs.User{}))
-	}
-	info, err := f.Stat(oldpath)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return fmt.Errorf("rename directories not supported")
-	}
-	parent := path.Dir(newFull)
-	if _, err := f.ensureDir(parent); err != nil {
-		return err
-	}
-	if _, err := f.back.Copy(f.ctx, oldFull, newFull, fs.CopyOptions{Overwrite: true}); err != nil {
-		return translateErr(err)
-	}
-	return translateErr(f.back.Remove(f.ctx, oldFull, fs.RemoveOptions{}))
+	return translateErr(f.back.Rename(f.ctx, oldFull, newFull, vfs.RenameOptions{}, vfs.User{}))
 }
 
 func (f *filesystem) Remove(filename string) error {

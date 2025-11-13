@@ -1,10 +1,12 @@
-package fs
+package vfs
 
 import (
 	"context"
 	"io"
 	"os"
 	"time"
+
+	"github.com/jacktea/xgfs/pkg/fs"
 )
 
 // OpenFlags enumerates POSIX open(2) flags.
@@ -88,18 +90,16 @@ type FileRange struct {
 	Length int64 // 0 == to EOF
 }
 
-// PosixObject extends Object with write-at/lock semantics.
+// PosixObject extends fs.Object with write-at/lock semantics.
 type PosixObject interface {
-	Object
-	WriteAt(ctx context.Context, r io.Reader, offset int64, opts IOOptions) (int64, error)
+	fs.Object
+	WriteAt(ctx context.Context, r io.Reader, offset int64, opts fs.IOOptions) (int64, error)
 	Truncate(ctx context.Context, size int64) error
 }
 
-// PosixFs extends Fs with POSIX operations.
+// PosixFs extends fs.Fs with POSIX operations.
 type PosixFs interface {
-	Fs
-
-	OpenFile(ctx context.Context, path string, flags OpenFlags, perm os.FileMode, user User) (Object, error)
+	OpenFile(ctx context.Context, path string, flags OpenFlags, perm os.FileMode, user User) (fs.Object, error)
 	Rename(ctx context.Context, oldPath, newPath string, opts RenameOptions, user User) error
 	SetAttr(ctx context.Context, path string, changes AttrChanges, user User) error
 	Access(ctx context.Context, path string, mode AccessMode, user User) error
@@ -109,4 +109,10 @@ type PosixFs interface {
 	Readlink(ctx context.Context, link string, user User) (string, error)
 	Lock(ctx context.Context, path string, opts LockOptions, user User) error
 	Unlock(ctx context.Context, path string, opts LockOptions, user User) error
+}
+
+// PosixProvider allows backends to expose a PosixFs adapter without having the
+// primary type implement the interface directly.
+type PosixProvider interface {
+	PosixAdapter() PosixFs
 }
