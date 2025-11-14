@@ -12,9 +12,11 @@ The module root (`go.mod`) defines `github.com/jacktea/xgfs`; treat it as the si
 - `golangci-lint run` – run the aggregated linters if you have the tool installed locally.
 - Wrap every backend in `pkg/vfs.FS` before handing it to CLI/HTTP/S3/NFS. The wrapper now
   enforces POSIX permissions (Access/Rename/SetAttr) and is the supported way to obtain
-  `vfs.PosixFs`. CLI flag `--meta-cache-size` controls the vfs metadata cache (0 disables).
+  `vfs.PosixFs`. Use `--meta-cache-size`/`--meta-cache-ttl` to tune or disable the metadata cache.
 - CLI configuration can also be supplied via `--config <file>` (TOML or YAML). By default the
-  CLI searches for `xgfs.toml|yaml` in the current directory and `~/.config/xgfs/`.
+  CLI searches for `xgfs.toml|yaml` in the current directory and `~/.config/xgfs/`. Hybrid
+  deployments may set `hybrid_root` (flag or config) to choose the local mirror directory when
+  the secondary provider is `local`.
 
 ## Coding Style & Naming Conventions
 

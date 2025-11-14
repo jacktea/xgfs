@@ -61,13 +61,13 @@ This document captures the working context Codex agents need so new sessions can
 - Handles writes by chunking through the sharder; handles reads/read-at through shard-aware concatenation.
 - Supports `Link` (hard) and `LinkKind` (symlink) semantics, consistent with metadata store.
 - Exposes `PosixAdapter()` so `vfs.FS` can opt into native rename/chmod/mkfifo implementations without requiring callers to depend on `localfs` directly.
-- `HybridOptions` integrate with `blob.HybridStore` to mirror shards to remote/cloud tiers and optionally hydrate local cache on reads.
+- `HybridOptions` integrate with `blob.HybridStore` to mirror shards to remote/cloud tiers and optionally hydrate local cache on reads. When using a local hybrid provider, set `hybrid_root` (flag or config) so the secondary `PathStore` has its own directory.
 
 ## Access Layers
 
-- **CLI (`cmd/xgfs`)**: commands (`ls`, `cat`, `put`, `cp`, `chmod`, `chown`, `rename`, `mkfifo`, `gc`) run against a `vfs.FS` wrapper, so POSIX operations always pass through the same layer; identity is sourced from the invoking OS user.
+- **CLI (`cmd/xgfs`)**: commands (`ls`, `cat`, `put`, `cp`, `mkdir`, `chmod`, `chown`, `rename`, `mkfifo`, `gc`) run against a `vfs.FS` wrapper, so POSIX operations always pass through the same layer; identity is sourced from the invoking OS user. Flags can also come from config files (`xgfs.toml|yaml`) or `XGFS_*` environment variables.
 - **FUSE (`pkg/server/fuse`)**: go-fuse v2 server mapping real filesystem operations to `fs.Fs` calls; uses `ReadAt`/`WriteAt` for kernel-driven offsets.
-- **HTTP API (`pkg/server/httpapi`)**: lightweight REST bridging HTTP verbs to fs actions; now requires a `vfs.Filesystem`, so chmod/rename/mkfifo always route through the same layer.
+- **HTTP API (`pkg/server/httpapi`)**: lightweight REST bridging HTTP verbs to fs actions; now requires a `vfs.Filesystem`, so chmod/rename/mkfifo always route through the same layer. Range headers are supported for byte-serving large files.
 - **NFS (`pkg/server/nfs`)**: backed by `github.com/willscott/go-nfs`; exports any `vfs.Filesystem` via a billy adapter, supports API-key/rate limits via shared middleware, and exposes `--export`/`--handle-cache` flags.
   - The adapter now calls `vfs.PosixFs.Rename/SetAttr` directly, so NFS clients see atomic renames and metadata changes without copy/delete fallbacks.
 - **S3 Gateway (`pkg/server/s3gw`)**: protocol adapter exercised by smoke tests; now hard-requires a `vfs.Filesystem` so metadata headers and POST rename can trust the POSIX layer.

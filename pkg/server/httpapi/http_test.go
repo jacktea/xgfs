@@ -45,6 +45,46 @@ func TestHTTPAPIPutAndGet(t *testing.T) {
 	}
 }
 
+func TestHTTPAPIRangeGet(t *testing.T) {
+	ctx := context.Background()
+	backend, err := localfs.New(ctx, localfs.Config{BlobRoot: t.TempDir(), CacheEntries: 8})
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	obj, err := backend.Create(ctx, "/range.txt", fs.CreateOptions{Mode: 0o644, Overwrite: true})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := obj.Write(ctx, bytes.NewBufferString("hello world"), fs.IOOptions{}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{})}
+	handler := srv.router()
+
+	req := httptest.NewRequest(http.MethodGet, "/files/range.txt", nil)
+	req.Header.Set("Range", "bytes=6-10")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusPartialContent {
+		t.Fatalf("expected 206, got %d", rr.Code)
+	}
+	body, _ := io.ReadAll(rr.Body)
+	if string(body) != "world" {
+		t.Fatalf("expected world, got %q", string(body))
+	}
+	if got := rr.Header().Get("Content-Range"); got != "bytes 6-10/11" {
+		t.Fatalf("unexpected content-range %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/files/range.txt", nil)
+	req.Header.Set("Range", "bytes=50-60")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("expected 416, got %d", rr.Code)
+	}
+}
+
 func TestHTTPAPIAuthMiddleware(t *testing.T) {
 	ctx := context.Background()
 	backend, err := localfs.New(ctx, localfs.Config{BlobRoot: t.TempDir(), CacheEntries: 8})

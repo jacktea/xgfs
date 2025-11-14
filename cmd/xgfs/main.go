@@ -64,6 +64,7 @@ func (a *app) ensureBackend() error {
 	}
 
 	blobStore, err := buildBlobStore(viper.GetString("storage_provider"), storageOptions{
+		Root:         viper.GetString("root"),
 		Endpoint:     viper.GetString("storage_endpoint"),
 		Bucket:       viper.GetString("storage_bucket"),
 		Region:       viper.GetString("storage_region"),
@@ -79,6 +80,7 @@ func (a *app) ensureBackend() error {
 	var hybridOpts *blob.HybridOptions
 	if prov := viper.GetString("hybrid_provider"); prov != "" {
 		secondary, err = buildBlobStore(prov, storageOptions{
+			Root:         viper.GetString("hybrid_root"),
 			Endpoint:     viper.GetString("hybrid_endpoint"),
 			Bucket:       viper.GetString("hybrid_bucket"),
 			Region:       viper.GetString("hybrid_region"),
@@ -241,7 +243,10 @@ func initRootFlags() {
 	bindConfig("storage_secret_key", rootCmd.PersistentFlags().Lookup("storage-secret-key"))
 	bindConfig("storage_session_token", rootCmd.PersistentFlags().Lookup("storage-session-token"))
 
+	rootCmd.PersistentFlags().String("hybrid-root", ".xgfs/hybrid", "local path used when hybrid provider is local")
+
 	bindConfig("hybrid_provider", rootCmd.PersistentFlags().Lookup("hybrid-provider"))
+	bindConfig("hybrid_root", rootCmd.PersistentFlags().Lookup("hybrid-root"))
 	bindConfig("hybrid_endpoint", rootCmd.PersistentFlags().Lookup("hybrid-endpoint"))
 	bindConfig("hybrid_bucket", rootCmd.PersistentFlags().Lookup("hybrid-bucket"))
 	bindConfig("hybrid_region", rootCmd.PersistentFlags().Lookup("hybrid-region"))
@@ -261,6 +266,7 @@ func initCommands() {
 		newPutCmd(),
 		newCatCmd(),
 		newCpCmd(),
+		newMkdirCmd(),
 		newServeHTTPCmd(),
 		newServeS3Cmd(),
 		newMountFuseCmd(),
@@ -334,6 +340,36 @@ func newCpCmd() *cobra.Command {
 			return doCopy(ctx, backend, args[0], args[1])
 		},
 	}
+}
+
+func newMkdirCmd() *cobra.Command {
+	var (
+		modeStr string
+		parents bool
+	)
+	cmd := &cobra.Command{
+		Use:   "mkdir <path>",
+		Short: "Create a directory",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mode := os.FileMode(0o755)
+			if modeStr != "" {
+				value, err := strconv.ParseUint(modeStr, 8, 32)
+				if err != nil {
+					return fmt.Errorf("invalid mode: %w", err)
+				}
+				mode = os.FileMode(value)
+			}
+			ctx, backend := appContext()
+			return doMkdir(ctx, backend, args[0], fs.MkdirOptions{
+				Parents: parents,
+				Mode:    uint32(mode.Perm()),
+			})
+		},
+	}
+	cmd.Flags().BoolVarP(&parents, "parents", "p", false, "make parent directories as needed")
+	cmd.Flags().StringVar(&modeStr, "mode", "", "octal directory mode (default 0755)")
+	return cmd
 }
 
 func newGCCmd() *cobra.Command {
@@ -534,7 +570,11 @@ type nfsServeOptions struct {
 func buildBlobStore(provider string, opts storageOptions) (blob.Store, error) {
 	switch strings.ToLower(provider) {
 	case "", "local":
-		return nil, nil
+		root := opts.Root
+		if root == "" {
+			root = ".xgfs/blobs"
+		}
+		return blob.NewPathStore(root)
 	case "s3":
 		if opts.Endpoint == "" || opts.Bucket == "" || opts.AccessKey == "" || opts.SecretKey == "" || opts.Region == "" {
 			return nil, errors.New("s3 config requires endpoint, bucket, region, access key, and secret key")
@@ -585,6 +625,7 @@ func buildBlobStore(provider string, opts storageOptions) (blob.Store, error) {
 }
 
 type storageOptions struct {
+	Root         string
 	Endpoint     string
 	Bucket       string
 	Region       string
@@ -703,6 +744,11 @@ func doCat(ctx context.Context, backend fs.Fs, src string) error {
 
 func doCopy(ctx context.Context, backend fs.Fs, src, dst string) error {
 	_, err := backend.Copy(ctx, src, dst, fs.CopyOptions{})
+	return err
+}
+
+func doMkdir(ctx context.Context, backend fs.Fs, path string, opts fs.MkdirOptions) error {
+	_, err := backend.Mkdir(ctx, path, opts)
 	return err
 }
 

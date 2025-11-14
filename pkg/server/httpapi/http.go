@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -91,6 +93,33 @@ func (s *Server) serveFile(ctx context.Context, w http.ResponseWriter, r *http.R
 		httpError(w, err)
 		return
 	}
+	size := obj.Size()
+	w.Header().Set("Accept-Ranges", "bytes")
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		start, end, parseErr := parseRangeHeader(rangeHeader, size)
+		if parseErr != nil {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			http.Error(w, "invalid range", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		length := end - start + 1
+		buf := make([]byte, length)
+		n, err := obj.ReadAt(ctx, buf, start, fs.IOOptions{})
+		if err != nil && !errors.Is(err, io.EOF) {
+			httpError(w, err)
+			return
+		}
+		if n == 0 {
+			httpError(w, fs.ErrNotFound)
+			return
+		}
+		actualEnd := start + int64(n) - 1
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", n))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, actualEnd, size))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(buf[:n])
+		return
+	}
 	reader := &sequentialWriter{w: w}
 	if _, err := obj.Read(ctx, reader, fs.IOOptions{}); err != nil {
 		httpError(w, err)
@@ -98,7 +127,7 @@ func (s *Server) serveFile(ctx context.Context, w http.ResponseWriter, r *http.R
 	}
 }
 
-func (s *Server) headFile(ctx context.Context, w http.ResponseWriter, r *http.Request, p string) {
+func (s *Server) headFile(ctx context.Context, w http.ResponseWriter, _ *http.Request, p string) {
 	obj, err := s.FS.Stat(ctx, p)
 	if err != nil {
 		httpError(w, err)
@@ -325,6 +354,56 @@ func toDirEntry(entry fs.Entry) dirEntry {
 	default:
 		return dirEntry{Name: entry.Name, Type: "unknown"}
 	}
+}
+
+func parseRangeHeader(header string, size int64) (int64, int64, error) {
+	if size <= 0 {
+		return 0, 0, fmt.Errorf("resource empty")
+	}
+	if !strings.HasPrefix(header, "bytes=") {
+		return 0, 0, fmt.Errorf("unsupported range unit")
+	}
+	rangeSpec := strings.TrimSpace(strings.TrimPrefix(header, "bytes="))
+	if rangeSpec == "" || strings.Contains(rangeSpec, ",") {
+		return 0, 0, fmt.Errorf("invalid range")
+	}
+	if strings.HasPrefix(rangeSpec, "-") {
+		n, err := strconv.ParseInt(strings.TrimPrefix(rangeSpec, "-"), 10, 64)
+		if err != nil || n <= 0 {
+			return 0, 0, fmt.Errorf("invalid suffix range")
+		}
+		if n > size {
+			n = size
+		}
+		return size - n, size - 1, nil
+	}
+	parts := strings.SplitN(rangeSpec, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid range spec")
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+	if err != nil || start < 0 {
+		return 0, 0, fmt.Errorf("invalid range start")
+	}
+	var end int64
+	if parts[1] == "" {
+		end = size - 1
+	} else {
+		end, err = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil || end < 0 {
+			return 0, 0, fmt.Errorf("invalid range end")
+		}
+	}
+	if start >= size {
+		return 0, 0, fmt.Errorf("start beyond size")
+	}
+	if end >= size {
+		end = size - 1
+	}
+	if start > end {
+		return 0, 0, fmt.Errorf("start greater than end")
+	}
+	return start, end, nil
 }
 
 func (s *Server) listingParams(r *http.Request) (limit int, token string) {

@@ -5,12 +5,13 @@ import (
 )
 
 func TestBuildBlobStoreLocal(t *testing.T) {
-	store, err := buildBlobStore("local", storageOptions{})
+	root := t.TempDir()
+	store, err := buildBlobStore("local", storageOptions{Root: root})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if store != nil {
-		t.Fatalf("expected nil store for local")
+	if store == nil {
+		t.Fatalf("expected path store instance")
 	}
 }
 
