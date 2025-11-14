@@ -20,7 +20,7 @@ var (
 	bucketGCQueue = []byte("gc_queue")
 
 	metaNextIDKey = []byte("next-id")
-	rootInodeID   = fs.ID("root")
+	rootInodeID   = RootID
 )
 
 // BoltConfig configures the BoltDB-backed store.
@@ -70,16 +70,20 @@ func (b *BoltStore) init() error {
 		}
 		meta := tx.Bucket(bucketMeta)
 		if meta.Get(metaNextIDKey) == nil {
-			if err := meta.Put(metaNextIDKey, encodeUint64(1)); err != nil {
+			if err := meta.Put(metaNextIDKey, encodeUint64(2)); err != nil {
+				return err
+			}
+		} else if cur := decodeUint64(meta.Get(metaNextIDKey)); cur < 2 {
+			if err := meta.Put(metaNextIDKey, encodeUint64(2)); err != nil {
 				return err
 			}
 		}
 		inodes := tx.Bucket(bucketInodes)
-		if inodes.Get([]byte(rootInodeID)) == nil {
+		if inodes.Get(idKey(rootInodeID)) == nil {
 			now := time.Now()
 			root := Inode{
 				ID:        rootInodeID,
-				Parent:    "",
+				Parent:    0,
 				Name:      "/",
 				Type:      TypeDirectory,
 				Mode:      0o755,
@@ -95,7 +99,7 @@ func (b *BoltStore) init() error {
 			if err != nil {
 				return err
 			}
-			if err := inodes.Put([]byte(root.ID), data); err != nil {
+			if err := inodes.Put(idKey(root.ID), data); err != nil {
 				return err
 			}
 		}
@@ -129,13 +133,13 @@ func (b *BoltStore) Put(ctx context.Context, inode Inode) error {
 		if err != nil {
 			return err
 		}
-		return tx.Bucket(bucketInodes).Put([]byte(inode.ID), data)
+		return tx.Bucket(bucketInodes).Put(idKey(inode.ID), data)
 	})
 }
 
 func (b *BoltStore) Delete(ctx context.Context, id fs.ID) error {
 	return b.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketInodes).Delete([]byte(id))
+		return tx.Bucket(bucketInodes).Delete(idKey(id))
 	})
 }
 
@@ -173,7 +177,7 @@ func (b *BoltStore) AllocateID(ctx context.Context) (fs.ID, error) {
 		if err := meta.Put(metaNextIDKey, encodeUint64(next)); err != nil {
 			return err
 		}
-		id = fs.ID(fmt.Sprintf("inode-%d", cur))
+		id = fs.ID(cur)
 		return nil
 	})
 	return id, err
@@ -252,7 +256,7 @@ func (b *BoltStore) Close() error {
 }
 
 func (b *BoltStore) getInode(tx *bolt.Tx, id fs.ID) (Inode, error) {
-	data := tx.Bucket(bucketInodes).Get([]byte(id))
+	data := tx.Bucket(bucketInodes).Get(idKey(id))
 	if data == nil {
 		return Inode{}, fs.ErrNotFound
 	}
@@ -265,6 +269,10 @@ func decodeInode(data []byte) (Inode, error) {
 		return Inode{}, err
 	}
 	return inode, nil
+}
+
+func idKey(id fs.ID) []byte {
+	return encodeUint64(uint64(id))
 }
 
 func encodeUint64(v uint64) []byte {
@@ -312,11 +320,11 @@ func (t *boltTxn) Put(ctx context.Context, inode Inode) error {
 	if err != nil {
 		return err
 	}
-	return t.tx.Bucket(bucketInodes).Put([]byte(inode.ID), data)
+	return t.tx.Bucket(bucketInodes).Put(idKey(inode.ID), data)
 }
 
 func (t *boltTxn) Delete(ctx context.Context, id fs.ID) error {
-	return t.tx.Bucket(bucketInodes).Delete([]byte(id))
+	return t.tx.Bucket(bucketInodes).Delete(idKey(id))
 }
 
 func (t *boltTxn) Children(ctx context.Context, parent fs.ID) ([]Inode, error) {
@@ -349,9 +357,9 @@ func (t *boltTxn) AllocateID(ctx context.Context) (fs.ID, error) {
 	cur := decodeUint64(meta.Get(metaNextIDKey))
 	next := cur + 1
 	if err := meta.Put(metaNextIDKey, encodeUint64(next)); err != nil {
-		return "", err
+		return 0, err
 	}
-	return fs.ID(fmt.Sprintf("inode-%d", cur)), nil
+	return fs.ID(cur), nil
 }
 
 func (t *boltTxn) IncRef(ctx context.Context, shardID string, delta int) (int, error) {

@@ -23,9 +23,9 @@ func TestFileStorePersistsData(t *testing.T) {
 	}
 	inode := Inode{
 		ID:        id,
-		Parent:    fs.ID("root"),
+		Parent:    RootID,
 		Name:      "foo",
-		Parents:   parentMap(fs.ID("root"), "foo"),
+		Parents:   parentMap(RootID, "foo"),
 		Type:      TypeFile,
 		Mode:      0o644,
 		UID:       0,
@@ -48,7 +48,7 @@ func TestFileStorePersistsData(t *testing.T) {
 	if got.Name != "foo" {
 		t.Fatalf("expected foo, got %s", got.Name)
 	}
-	kids, err := reopened.Children(ctx, fs.ID("root"))
+	kids, err := reopened.Children(ctx, RootID)
 	if err != nil {
 		t.Fatalf("children: %v", err)
 	}

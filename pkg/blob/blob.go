@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"hash"
 	"io"
+
+	"github.com/jacktea/xgfs/pkg/encryption"
 )
 
 // ID is the logical identifier for a shard.
@@ -20,10 +22,9 @@ type Store interface {
 
 // PutOptions controls blob persistence.
 type PutOptions struct {
-	Encrypt   bool
-	Key       []byte
-	Checksum  string
-	DedupOnly bool
+	Encryption encryption.Options
+	Checksum   string
+	DedupOnly  bool
 }
 
 // Hasher returns a helper for deterministic shard IDs.

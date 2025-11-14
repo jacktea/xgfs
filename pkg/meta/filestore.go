@@ -62,13 +62,16 @@ func (f *FileStore) loadOrInit() error {
 		if f.pendingGC == nil {
 			f.pendingGC = make(map[string]struct{})
 		}
+		if state.NextID < 2 {
+			state.NextID = 2
+		}
 		f.nextID = state.NextID
 		return nil
 	}
 	now := time.Now()
 	root := Inode{
-		ID:        fs.ID("root"),
-		Parent:    "",
+		ID:        RootID,
+		Parent:    0,
 		Name:      "/",
 		Parents:   map[fs.ID]map[string]struct{}{},
 		Type:      TypeDirectory,
@@ -83,14 +86,14 @@ func (f *FileStore) loadOrInit() error {
 	f.inodes = map[fs.ID]Inode{root.ID: root}
 	f.shards = make(map[string]int)
 	f.pendingGC = make(map[string]struct{})
-	f.nextID = 1
+	f.nextID = 2
 	return f.persistLocked()
 }
 
 func (f *FileStore) Root(ctx context.Context) (Inode, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	inode, ok := f.inodes[fs.ID("root")]
+	inode, ok := f.inodes[RootID]
 	if !ok {
 		return Inode{}, fs.ErrNotFound
 	}
@@ -144,10 +147,10 @@ func (f *FileStore) Children(ctx context.Context, parent fs.ID) ([]Inode, error)
 func (f *FileStore) AllocateID(ctx context.Context) (fs.ID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	id := fs.ID(fmt.Sprintf("inode-%d", f.nextID))
+	id := fs.ID(f.nextID)
 	f.nextID++
 	if err := f.persistLocked(); err != nil {
-		return "", err
+		return 0, err
 	}
 	return id, nil
 }

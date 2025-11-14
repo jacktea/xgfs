@@ -10,6 +10,7 @@ import (
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/meta"
 	"github.com/jacktea/xgfs/pkg/vfs"
+	"github.com/jacktea/xgfs/pkg/xerrors"
 )
 
 type posixAdapter struct {
@@ -72,7 +73,7 @@ func (p *posixAdapter) Rename(ctx context.Context, oldPath, newPath string, opts
 		return nil
 	}
 	if src == "/" {
-		return fmt.Errorf("cannot rename root")
+		return xerrors.E(xerrors.KindInvalid, "localfs.Rename", src)
 	}
 	srcParentPath, srcName := splitParent(src)
 	dstParentPath, dstName := splitParent(dst)
@@ -202,8 +203,12 @@ func (p *posixAdapter) Mkfifo(ctx context.Context, path string, perm os.FileMode
 	if _, err := l.child(ctx, parentDir.inode.ID, name); err == nil {
 		return fs.ErrAlreadyExist
 	}
+	id, err := l.store.AllocateID(ctx)
+	if err != nil {
+		return err
+	}
 	inode := meta.Inode{
-		ID:        fs.ID(fmt.Sprintf("fifo-%d", time.Now().UnixNano())),
+		ID:        id,
 		Parent:    parentDir.inode.ID,
 		Name:      name,
 		Type:      meta.TypeFile,
@@ -271,18 +276,18 @@ func (p *posixAdapter) Lock(ctx context.Context, path string, opts vfs.LockOptio
 	}
 	if record.owner != owner {
 		if record.exclusive || opts.Exclusive {
-			return fmt.Errorf("lock held by %s", record.owner)
+			return xerrors.Wrap(xerrors.KindPermission, "localfs.Lock", target, fmt.Errorf("held by %s", record.owner))
 		}
 	}
 	if opts.Exclusive && !record.exclusive && record.ref > 0 && record.owner == owner {
 		if record.ref > 1 {
-			return fmt.Errorf("lock upgrade not supported")
+			return xerrors.E(xerrors.KindInvalid, "localfs.Lock", target)
 		}
 		record.exclusive = true
 		return nil
 	}
 	if record.exclusive && record.owner != owner {
-		return fmt.Errorf("lock held by %s", record.owner)
+		return xerrors.Wrap(xerrors.KindPermission, "localfs.Lock", target, fmt.Errorf("held by %s", record.owner))
 	}
 	record.ref++
 	return nil
@@ -299,10 +304,10 @@ func (p *posixAdapter) Unlock(ctx context.Context, path string, opts vfs.LockOpt
 	defer l.lockMu.Unlock()
 	record := l.locks[target]
 	if record == nil {
-		return fmt.Errorf("lock not held")
+		return xerrors.E(xerrors.KindInvalid, "localfs.Unlock", target)
 	}
 	if record.owner != owner {
-		return fmt.Errorf("lock held by %s", record.owner)
+		return xerrors.Wrap(xerrors.KindPermission, "localfs.Unlock", target, fmt.Errorf("held by %s", record.owner))
 	}
 	record.ref--
 	if record.ref <= 0 {

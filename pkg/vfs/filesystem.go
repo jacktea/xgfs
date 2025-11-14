@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jacktea/xgfs/pkg/cache"
 	"github.com/jacktea/xgfs/pkg/fs"
 )
 
@@ -35,9 +36,7 @@ type FS struct {
 	opts    Options
 
 	cacheMu   sync.RWMutex
-	metaCache map[string]cachedMeta
-	cacheTTL  time.Duration
-	cacheSize int
+	metaCache *cache.Cache
 }
 
 var _ PosixFs = (*FS)(nil)
@@ -66,9 +65,7 @@ func New(backend fs.Fs, opts Options) *FS {
 		if ttl <= 0 {
 			ttl = 5 * time.Second
 		}
-		fs.cacheTTL = ttl
-		fs.cacheSize = opts.MetadataCacheSize
-		fs.metaCache = make(map[string]cachedMeta, opts.MetadataCacheSize)
+		fs.metaCache = cache.New(opts.MetadataCacheSize, ttl)
 	}
 	return fs
 }
@@ -82,7 +79,11 @@ func (f *FS) Root(ctx context.Context) (fs.Directory, error) {
 	return f.backend.Root(ctx)
 }
 func (f *FS) Stat(ctx context.Context, path string) (fs.Object, error) {
-	return f.backend.Stat(ctx, path)
+	obj, err := f.backend.Stat(ctx, path)
+	if err == nil {
+		f.cachePut(cleanPath(path), obj.Metadata(), false)
+	}
+	return obj, err
 }
 func (f *FS) Create(ctx context.Context, path string, opts fs.CreateOptions) (fs.Object, error) {
 	user := UserFromContext(ctx)
@@ -514,29 +515,20 @@ func parentPath(p string) string {
 	return path.Dir(clean)
 }
 
-type cachedMeta struct {
-	meta    fs.Metadata
-	isDir   bool
-	expires time.Time
-}
-
 func (f *FS) cacheGet(path string) (fs.Metadata, bool, bool) {
 	if f.metaCache == nil {
 		return fs.Metadata{}, false, false
 	}
 	f.cacheMu.RLock()
-	entry, ok := f.metaCache[path]
+	value, ok := f.metaCache.Get(path)
 	f.cacheMu.RUnlock()
 	if !ok {
 		return fs.Metadata{}, false, false
 	}
-	if time.Now().After(entry.expires) {
-		f.cacheMu.Lock()
-		delete(f.metaCache, path)
-		f.cacheMu.Unlock()
-		return fs.Metadata{}, false, false
+	if entry, ok := value.(metaEntry); ok {
+		return entry.meta, entry.isDir, true
 	}
-	return entry.meta, entry.isDir, true
+	return fs.Metadata{}, false, false
 }
 
 func (f *FS) cachePut(path string, meta fs.Metadata, isDir bool) {
@@ -544,18 +536,8 @@ func (f *FS) cachePut(path string, meta fs.Metadata, isDir bool) {
 		return
 	}
 	f.cacheMu.Lock()
-	defer f.cacheMu.Unlock()
-	if f.cacheSize > 0 && len(f.metaCache) >= f.cacheSize {
-		for k := range f.metaCache {
-			delete(f.metaCache, k)
-			break
-		}
-	}
-	f.metaCache[path] = cachedMeta{
-		meta:    meta,
-		isDir:   isDir,
-		expires: time.Now().Add(f.cacheTTL),
-	}
+	f.metaCache.Set(path, metaEntry{meta: meta, isDir: isDir})
+	f.cacheMu.Unlock()
 }
 
 func (f *FS) cacheDelete(path string) {
@@ -563,6 +545,11 @@ func (f *FS) cacheDelete(path string) {
 		return
 	}
 	f.cacheMu.Lock()
-	delete(f.metaCache, path)
+	f.metaCache.Delete(path)
 	f.cacheMu.Unlock()
+}
+
+type metaEntry struct {
+	meta  fs.Metadata
+	isDir bool
 }

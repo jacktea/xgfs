@@ -3,8 +3,6 @@ package meta
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/jacktea/xgfs/pkg/fs"
 )
@@ -23,7 +21,7 @@ func MigrateToBolt(ctx context.Context, src Store, cfg BoltConfig) (*BoltStore, 
 		return nil, fmt.Errorf("migrate: fetch root: %w", err)
 	}
 	queue = append(queue, root.ID)
-	maxID := uint64(1)
+	maxID := uint64(root.ID)
 	shardRefs := make(map[string]int)
 
 	for len(queue) > 0 {
@@ -45,7 +43,7 @@ func MigrateToBolt(ctx context.Context, src Store, cfg BoltConfig) (*BoltStore, 
 			return nil, fmt.Errorf("migrate: write %s: %w", id, err)
 		}
 		visited[id] = struct{}{}
-		if n, ok := parseInodeNumber(id); ok && n > maxID {
+		if n := uint64(inode.ID); n > maxID {
 			maxID = n
 		}
 		for _, shard := range inode.Shards {
@@ -67,17 +65,4 @@ func MigrateToBolt(ctx context.Context, src Store, cfg BoltConfig) (*BoltStore, 
 		return nil, err
 	}
 	return dst, nil
-}
-
-func parseInodeNumber(id fs.ID) (uint64, bool) {
-	const prefix = "inode-"
-	s := string(id)
-	if !strings.HasPrefix(s, prefix) {
-		return 0, false
-	}
-	n, err := strconv.ParseUint(s[len(prefix):], 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return n, true
 }

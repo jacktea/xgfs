@@ -17,6 +17,7 @@ import (
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/server/middleware"
 	"github.com/jacktea/xgfs/pkg/vfs"
+	"github.com/jacktea/xgfs/pkg/xerrors"
 )
 
 // Filesystem combines the base fs.Fs surface with POSIX extensions. Callers
@@ -202,13 +203,28 @@ func cleanPath(p string) string {
 
 func httpError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
-	switch err {
-	case fs.ErrNotFound:
+	switch {
+	case errors.Is(err, fs.ErrNotFound):
 		status = http.StatusNotFound
-	case fs.ErrAlreadyExist:
+	case errors.Is(err, fs.ErrAlreadyExist):
 		status = http.StatusConflict
-	case fs.ErrNotSupported:
+	case errors.Is(err, fs.ErrNotSupported):
 		status = http.StatusNotImplemented
+	default:
+		switch xerrors.KindOf(err) {
+		case xerrors.KindNotFound:
+			status = http.StatusNotFound
+		case xerrors.KindAlreadyExists:
+			status = http.StatusConflict
+		case xerrors.KindPermission:
+			status = http.StatusForbidden
+		case xerrors.KindRange:
+			status = http.StatusRequestedRangeNotSatisfiable
+		case xerrors.KindInvalid:
+			status = http.StatusBadRequest
+		case xerrors.KindNotSupported:
+			status = http.StatusNotImplemented
+		}
 	}
 	http.Error(w, err.Error(), status)
 }

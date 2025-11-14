@@ -117,8 +117,12 @@ func TestMigrateToBolt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mem root: %v", err)
 	}
+	childID, err := mem.AllocateID(ctx)
+	if err != nil {
+		t.Fatalf("alloc child: %v", err)
+	}
 	child := Inode{
-		ID:   fs.ID("inode-1"),
+		ID:   childID,
 		Type: TypeFile,
 		Size: 5,
 		Mode: 0o600,

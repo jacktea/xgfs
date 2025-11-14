@@ -2,10 +2,10 @@ package meta
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
+	"github.com/jacktea/xgfs/pkg/encryption"
 	"github.com/jacktea/xgfs/pkg/fs"
 )
 
@@ -18,6 +18,9 @@ const (
 	TypeDirectory
 	TypeSymlink
 )
+
+// RootID is the canonical ID for the filesystem root.
+const RootID fs.ID = 1
 
 // Inode describes a filesystem node with refcounts.
 type Inode struct {
@@ -40,12 +43,14 @@ type Inode struct {
 
 // ShardRef ties an inode to stored data.
 type ShardRef struct {
-	ShardID   string
-	Size      int64
-	Offset    int64
-	Version   int
-	Checksum  string
-	Encrypted bool
+	ShardID    string
+	Size       int64
+	StoredSize int64 `json:"stored_size,omitempty"`
+	Offset     int64
+	Version    int
+	Checksum   string
+	Encryption encryption.Method `json:"encryption,omitempty"`
+	Encrypted  bool              `json:"encrypted,omitempty"`
 }
 
 // Store persists inode metadata.
@@ -86,12 +91,12 @@ func NewMemoryStore() *MemoryStore {
 		inodes:    make(map[fs.ID]Inode),
 		shards:    make(map[string]int),
 		pendingGC: make(map[string]struct{}),
-		nextID:    1,
+		nextID:    2,
 	}
 	now := time.Now()
 	root := Inode{
-		ID:        fs.ID("root"),
-		Parent:    "",
+		ID:        RootID,
+		Parent:    0,
 		Name:      "/",
 		Parents:   map[fs.ID]map[string]struct{}{},
 		Type:      TypeDirectory,
@@ -110,7 +115,7 @@ func NewMemoryStore() *MemoryStore {
 func (m *MemoryStore) Root(ctx context.Context) (Inode, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	inode, ok := m.inodes["root"]
+	inode, ok := m.inodes[RootID]
 	if ok {
 		return inode, nil
 	}
@@ -164,7 +169,7 @@ func (m *MemoryStore) Children(ctx context.Context, parent fs.ID) ([]Inode, erro
 func (m *MemoryStore) AllocateID(ctx context.Context) (fs.ID, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	id := fs.ID(fmt.Sprintf("inode-%d", m.nextID))
+	id := fs.ID(m.nextID)
 	m.nextID++
 	return id, nil
 }

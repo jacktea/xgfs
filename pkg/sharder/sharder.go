@@ -3,31 +3,29 @@ package sharder
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
 
 	"github.com/jacktea/xgfs/pkg/blob"
+	"github.com/jacktea/xgfs/pkg/encryption"
 )
 
 // Shard represents a single encrypted chunk stored in blob storage.
 type Shard struct {
-	ID        blob.ID
-	Size      int64
-	Checksum  string
-	Encrypted bool
+	ID         blob.ID
+	Size       int64 // logical (plaintext) bytes
+	StoredSize int64 // physical bytes persisted (may include IV/overhead)
+	Checksum   string
+	Encryption encryption.Method
 }
 
 // WriterOptions controls chunking behaviour.
 type WriterOptions struct {
 	ChunkSize   int64
-	Encrypt     bool
-	Key         []byte
+	Encryption  encryption.Options
 	Concurrency int
 }
 
@@ -44,7 +42,7 @@ func ChunkAndStore(ctx context.Context, store blob.Store, r io.Reader, opts Writ
 
 // ReaderOptions controls concat behavior.
 type ReaderOptions struct {
-	Key         []byte
+	Keys        map[encryption.Method][]byte
 	Concurrency int
 }
 
@@ -172,26 +170,31 @@ func chunkConcurrent(ctx context.Context, store blob.Store, r io.Reader, opts Wr
 func persistChunk(ctx context.Context, store blob.Store, chunk []byte, opts WriterOptions) (Shard, error) {
 	sum := sha256.Sum256(chunk)
 	reader := bytes.NewReader(chunk)
-	id, written, err := store.Put(ctx, reader, int64(len(chunk)), blob.PutOptions{
-		Encrypt:  opts.Encrypt,
-		Key:      opts.Key,
-		Checksum: hex.EncodeToString(sum[:]),
+	logicalSize := int64(len(chunk))
+	id, storedSize, err := store.Put(ctx, reader, logicalSize, blob.PutOptions{
+		Encryption: opts.Encryption,
+		Checksum:   hex.EncodeToString(sum[:]),
 	})
 	if err != nil {
 		return Shard{}, err
 	}
+	method := opts.Encryption.Method
+	if !opts.Encryption.Enabled() {
+		method = encryption.MethodNone
+	}
 	return Shard{
-		ID:        id,
-		Size:      written,
-		Checksum:  hex.EncodeToString(sum[:]),
-		Encrypted: opts.Encrypt,
+		ID:         id,
+		Size:       logicalSize,
+		StoredSize: storedSize,
+		Checksum:   hex.EncodeToString(sum[:]),
+		Encryption: method,
 	}, nil
 }
 
 func concatSequential(ctx context.Context, store blob.Store, shards []Shard, w io.WriterAt, opts ReaderOptions) (int64, error) {
 	var offset int64
 	for _, shard := range shards {
-		data, err := fetchShard(ctx, store, shard, opts.Key)
+		data, err := fetchShard(ctx, store, shard, opts)
 		if err != nil {
 			return offset, err
 		}
@@ -221,7 +224,7 @@ func concatConcurrent(ctx context.Context, store blob.Store, shards []Shard, w i
 	worker := func() {
 		defer workerWG.Done()
 		for j := range jobCh {
-			data, err := fetchShard(ctx, store, j.shard, opts.Key)
+			data, err := fetchShard(ctx, store, j.shard, opts)
 			resCh <- result{index: j.index, data: data, err: err}
 			if err != nil {
 				cancel()
@@ -274,7 +277,7 @@ func concatConcurrent(ctx context.Context, store blob.Store, shards []Shard, w i
 	return offset, nil
 }
 
-func fetchShard(ctx context.Context, store blob.Store, shard Shard, key []byte) ([]byte, error) {
+func fetchShard(ctx context.Context, store blob.Store, shard Shard, opts ReaderOptions) ([]byte, error) {
 	rc, _, err := store.Get(ctx, shard.ID)
 	if err != nil {
 		return nil, err
@@ -284,22 +287,27 @@ func fetchShard(ctx context.Context, store blob.Store, shard Shard, key []byte) 
 	if err != nil {
 		return nil, err
 	}
-	if shard.Encrypted {
-		if len(key) != 32 {
-			return nil, errors.New("concat: missing 32-byte key for encrypted shard")
-		}
-		if len(data) < aes.BlockSize {
-			return nil, errors.New("concat: encrypted shard missing IV")
-		}
-		iv := data[:aes.BlockSize]
-		payload := append([]byte(nil), data[aes.BlockSize:]...)
-		block, err := aes.NewCipher(key)
-		if err != nil {
-			return nil, err
-		}
-		stream := cipher.NewCTR(block, iv)
-		stream.XORKeyStream(payload, payload)
-		return payload, nil
+	method := shard.Encryption
+	if method == "" {
+		method = encryption.MethodNone
 	}
-	return data, nil
+	if method == encryption.MethodNone {
+		return data, nil
+	}
+	key := opts.keyFor(method)
+	if len(key) == 0 {
+		return nil, fmt.Errorf("concat: missing key for %s shard", method)
+	}
+	plain, err := encryption.Decrypt(data, encryption.Options{Method: method, Key: key})
+	if err != nil {
+		return nil, err
+	}
+	return plain, nil
+}
+
+func (o ReaderOptions) keyFor(method encryption.Method) []byte {
+	if o.Keys == nil {
+		return nil
+	}
+	return o.Keys[method]
 }

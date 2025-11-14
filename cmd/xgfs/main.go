@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/jacktea/xgfs/pkg/blob"
+	"github.com/jacktea/xgfs/pkg/encryption"
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/localfs"
 	"github.com/jacktea/xgfs/pkg/server/fuse"
@@ -50,8 +51,19 @@ func (a *app) ensureBackend() error {
 	if chunkMB <= 0 {
 		chunkMB = 4
 	}
-	var key []byte
-	if viper.GetBool("encrypt") {
+	method := strings.ToLower(viper.GetString("encryption_method"))
+	var encOpts encryption.Options
+	if method != "" {
+		encOpts.Method = encryption.Method(method)
+	}
+	if encOpts.Method == "" {
+		if viper.GetBool("encrypt") {
+			encOpts.Method = encryption.MethodAES256CTR
+		} else {
+			encOpts.Method = encryption.MethodNone
+		}
+	}
+	if encOpts.Method != encryption.MethodNone {
 		k := viper.GetString("key")
 		if k == "" {
 			return errors.New("encryption enabled but key missing")
@@ -60,7 +72,10 @@ func (a *app) ensureBackend() error {
 		if err != nil || len(decoded) != 32 {
 			return errors.New("encryption key must be 32 bytes of hex")
 		}
-		key = decoded
+		encOpts.Key = decoded
+	}
+	if err := encOpts.Validate(); err != nil {
+		return err
 	}
 
 	blobStore, err := buildBlobStore(viper.GetString("storage_provider"), storageOptions{
@@ -103,8 +118,7 @@ func (a *app) ensureBackend() error {
 		Name:           viper.GetString("storage_provider"),
 		BlobRoot:       viper.GetString("root"),
 		ChunkSize:      int64(chunkMB) << 20,
-		Encrypt:        viper.GetBool("encrypt"),
-		Key:            key,
+		Encryption:     encOpts,
 		BlobStore:      blobStore,
 		SecondaryStore: secondary,
 		HybridOptions:  hybridOpts,
@@ -205,6 +219,7 @@ func initRootFlags() {
 	rootCmd.PersistentFlags().String("root", ".xgfs/blobs", "blob storage root (local provider)")
 	rootCmd.PersistentFlags().Int("chunk", 4, "shard size in MiB")
 	rootCmd.PersistentFlags().Bool("encrypt", false, "enable shard encryption")
+	rootCmd.PersistentFlags().String("encryption-method", "", "shard encryption algorithm (none|aes-256-ctr)")
 	rootCmd.PersistentFlags().String("key", "", "hex-encoded 32-byte key when encryption enabled")
 	rootCmd.PersistentFlags().String("meta", "", "path to metadata file store")
 
@@ -232,6 +247,7 @@ func initRootFlags() {
 	bindConfig("root", rootCmd.PersistentFlags().Lookup("root"))
 	bindConfig("chunk", rootCmd.PersistentFlags().Lookup("chunk"))
 	bindConfig("encrypt", rootCmd.PersistentFlags().Lookup("encrypt"))
+	bindConfig("encryption_method", rootCmd.PersistentFlags().Lookup("encryption-method"))
 	bindConfig("key", rootCmd.PersistentFlags().Lookup("key"))
 	bindConfig("meta", rootCmd.PersistentFlags().Lookup("meta"))
 

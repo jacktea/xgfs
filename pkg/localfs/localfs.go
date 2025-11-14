@@ -14,10 +14,12 @@ import (
 
 	"github.com/jacktea/xgfs/pkg/blob"
 	"github.com/jacktea/xgfs/pkg/cache"
+	"github.com/jacktea/xgfs/pkg/encryption"
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/gc"
 	"github.com/jacktea/xgfs/pkg/meta"
 	"github.com/jacktea/xgfs/pkg/sharder"
+	"github.com/jacktea/xgfs/pkg/xerrors"
 )
 
 // Config contains backend settings.
@@ -25,8 +27,7 @@ type Config struct {
 	Name             string
 	BlobRoot         string
 	ChunkSize        int64
-	Encrypt          bool
-	Key              []byte
+	Encryption       encryption.Options
 	CacheEntries     int
 	CacheTTL         time.Duration
 	MetaStore        meta.Store
@@ -50,6 +51,7 @@ type LocalFs struct {
 	metaCache    *cache.Cache
 	features     fs.Features
 	writerOpts   sharder.WriterOptions
+	readerKeys   map[encryption.Method][]byte
 	cacheEnabled bool
 	mu           sync.RWMutex
 	gcSweeper    *gc.Sweeper
@@ -69,8 +71,8 @@ func New(ctx context.Context, cfg Config) (*LocalFs, error) {
 	if cfg.CacheEntries == 0 {
 		cfg.CacheEntries = 1024
 	}
-	if cfg.Encrypt && len(cfg.Key) != 32 {
-		return nil, fmt.Errorf("localfs: encryption key must be 32 bytes")
+	if err := cfg.Encryption.Validate(); err != nil {
+		return nil, xerrors.Wrap(xerrors.KindInvalid, "localfs.New", "encryption", err)
 	}
 	if cfg.GCBatchSize <= 0 {
 		cfg.GCBatchSize = 128
@@ -88,6 +90,12 @@ func New(ctx context.Context, cfg Config) (*LocalFs, error) {
 	}
 	tracker := &meta.RefTracker{Store: store, Blob: blobStore}
 	metaCache := cache.New(cfg.CacheEntries, cfg.CacheTTL)
+	var keyring map[encryption.Method][]byte
+	if cfg.Encryption.Enabled() {
+		keyring = map[encryption.Method][]byte{
+			cfg.Encryption.Method: append([]byte(nil), cfg.Encryption.Key...),
+		}
+	}
 	fs := &LocalFs{
 		cfg:       cfg,
 		store:     store,
@@ -101,10 +109,10 @@ func New(ctx context.Context, cfg Config) (*LocalFs, error) {
 			SupportsMultipart:   true,
 		},
 		writerOpts: sharder.WriterOptions{
-			ChunkSize: cfg.ChunkSize,
-			Encrypt:   cfg.Encrypt,
-			Key:       cfg.Key,
+			ChunkSize:  cfg.ChunkSize,
+			Encryption: cfg.Encryption,
 		},
+		readerKeys:   keyring,
 		cacheEnabled: cfg.CacheEntries > 0,
 		locks:        make(map[string]*lockRecord),
 	}
@@ -120,6 +128,13 @@ func New(ctx context.Context, cfg Config) (*LocalFs, error) {
 	return fs, nil
 }
 
+func (l *LocalFs) readerOptions(concurrency int) sharder.ReaderOptions {
+	return sharder.ReaderOptions{
+		Keys:        l.readerKeys,
+		Concurrency: concurrency,
+	}
+}
+
 func init() {
 	fs.Register("local", func(ctx context.Context, raw map[string]any) (fs.Fs, error) {
 		cfg := Config{}
@@ -132,11 +147,16 @@ func init() {
 		if v, ok := raw["chunk_size"].(int64); ok && v > 0 {
 			cfg.ChunkSize = v
 		}
-		if v, ok := raw["encrypt"].(bool); ok {
-			cfg.Encrypt = v
+		if v, ok := raw["encryption_method"].(string); ok && v != "" {
+			cfg.Encryption.Method = encryption.Method(strings.ToLower(v))
 		}
-		if v, ok := raw["key"].([]byte); ok {
-			cfg.Key = v
+		if v, ok := raw["encrypt"].(bool); ok && v {
+			if cfg.Encryption.Method == "" || cfg.Encryption.Method == encryption.MethodNone {
+				cfg.Encryption.Method = encryption.MethodAES256CTR
+			}
+		}
+		if v, ok := raw["key"].([]byte); ok && len(v) > 0 {
+			cfg.Encryption.Key = append([]byte(nil), v...)
 		}
 		if v, ok := raw["cache_entries"].(int); ok {
 			cfg.CacheEntries = v
@@ -174,7 +194,7 @@ func (l *LocalFs) Stat(ctx context.Context, p string) (fs.Object, error) {
 func (l *LocalFs) Create(ctx context.Context, p string, opts fs.CreateOptions) (fs.Object, error) {
 	dirPath, fileName := splitParent(p)
 	if fileName == "" {
-		return nil, fmt.Errorf("missing file name in path %s", p)
+		return nil, xerrors.E(xerrors.KindInvalid, "localfs.Create", cleanPath(p))
 	}
 	parentDir, err := l.resolveDir(ctx, dirPath)
 	if err != nil {
@@ -228,7 +248,7 @@ func (l *LocalFs) Mkdir(ctx context.Context, p string, opts fs.MkdirOptions) (fs
 func (l *LocalFs) Remove(ctx context.Context, p string, opts fs.RemoveOptions) error {
 	target := cleanPath(p)
 	if target == "/" {
-		return fmt.Errorf("cannot remove root")
+		return xerrors.E(xerrors.KindInvalid, "localfs.Remove", target)
 	}
 	parentPath, name := splitParent(target)
 	parentDir, err := l.resolveDir(ctx, parentPath)
@@ -248,7 +268,7 @@ func (l *LocalFs) Remove(ctx context.Context, p string, opts fs.RemoveOptions) e
 			return err
 		}
 		if len(children) > 0 && !opts.Recursive {
-			return fmt.Errorf("directory not empty: %s", target)
+			return xerrors.Wrap(xerrors.KindInvalid, "localfs.Remove", target, fmt.Errorf("directory not empty"))
 		}
 		if opts.Recursive {
 			for _, child := range children {
@@ -338,7 +358,7 @@ func (l *LocalFs) Copy(ctx context.Context, source, target string, opts fs.CopyO
 	srcPath := cleanPath(source)
 	dstPath := cleanPath(target)
 	if srcPath == dstPath {
-		return nil, fmt.Errorf("copy: source and destination must differ")
+		return nil, xerrors.E(xerrors.KindInvalid, "localfs.Copy", dstPath)
 	}
 	srcInode, err := l.resolve(ctx, srcPath)
 	if err != nil {
@@ -349,7 +369,7 @@ func (l *LocalFs) Copy(ctx context.Context, source, target string, opts fs.CopyO
 	}
 	parentPath, name := splitParent(dstPath)
 	if name == "" {
-		return nil, fmt.Errorf("copy: destination must include file name")
+		return nil, xerrors.E(xerrors.KindInvalid, "localfs.Copy", dstPath)
 	}
 	parentDir, err := l.resolveDir(ctx, parentPath)
 	if err != nil {
@@ -361,7 +381,7 @@ func (l *LocalFs) Copy(ctx context.Context, source, target string, opts fs.CopyO
 			return nil, fs.ErrAlreadyExist
 		}
 		if existing.Type == meta.TypeDirectory {
-			return nil, fmt.Errorf("copy: cannot overwrite directory %s", dstPath)
+			return nil, xerrors.E(xerrors.KindInvalid, "localfs.Copy", dstPath)
 		}
 		if err := l.unlink(ctx, parentDir.inode.ID, name, existing); err != nil {
 			return nil, err
@@ -471,7 +491,7 @@ func (l *LocalFs) resolveDir(ctx context.Context, p string) (*localDirectory, er
 		return nil, err
 	}
 	if inode.Type != meta.TypeDirectory {
-		return nil, fmt.Errorf("not a directory: %s", p)
+		return nil, xerrors.E(xerrors.KindInvalid, "localfs.resolveDir", cleanPath(p))
 	}
 	return &localDirectory{fs: l, inode: inode, path: cleanPath(p)}, nil
 }
@@ -716,7 +736,7 @@ func (o *localObject) Read(ctx context.Context, w io.WriterAt, opts fs.IOOptions
 		return 0, err
 	}
 	shards := toShards(o.inode.Shards)
-	readOpts := sharder.ReaderOptions{Key: o.fs.writerOpts.Key, Concurrency: opts.Concurrency}
+	readOpts := o.fs.readerOptions(opts.Concurrency)
 	return sharder.Concat(ctx, o.fs.blobs, shards, w, readOpts)
 }
 
@@ -748,10 +768,7 @@ func (o *localObject) ReadAt(ctx context.Context, buf []byte, offset int64, opts
 	if startIdx >= len(o.inode.Shards) {
 		return 0, io.EOF
 	}
-	readerOpts := sharder.ReaderOptions{
-		Key:         o.fs.writerOpts.Key,
-		Concurrency: opts.Concurrency,
-	}
+	readerOpts := o.fs.readerOptions(opts.Concurrency)
 	_, err := sharder.Concat(ctx, o.fs.blobs, toShards(o.inode.Shards[startIdx:]), &offsetWriterAt{
 		base: baseOffset,
 		dst:  writer,
@@ -787,10 +804,7 @@ func (o *localObject) WriteAt(ctx context.Context, r io.Reader, offset int64, op
 	}
 	existing := &bufferWriterAt{}
 	if len(o.inode.Shards) > 0 {
-		if _, err := sharder.Concat(ctx, o.fs.blobs, toShards(o.inode.Shards), existing, sharder.ReaderOptions{
-			Key:         o.fs.writerOpts.Key,
-			Concurrency: opts.Concurrency,
-		}); err != nil {
+		if _, err := sharder.Concat(ctx, o.fs.blobs, toShards(o.inode.Shards), existing, o.fs.readerOptions(opts.Concurrency)); err != nil {
 			return 0, err
 		}
 	}
@@ -816,10 +830,7 @@ func (o *localObject) Truncate(ctx context.Context, size int64) error {
 		return err
 	}
 	buf := &bufferWriterAt{}
-	if _, err := sharder.Concat(ctx, o.fs.blobs, toShards(o.inode.Shards), buf, sharder.ReaderOptions{
-		Key:         o.fs.writerOpts.Key,
-		Concurrency: 1,
-	}); err != nil {
+	if _, err := sharder.Concat(ctx, o.fs.blobs, toShards(o.inode.Shards), buf, o.fs.readerOptions(1)); err != nil {
 		return err
 	}
 	data := buf.Bytes()
@@ -887,7 +898,21 @@ func toMetadata(inode meta.Inode) fs.Metadata {
 func toShards(refs []meta.ShardRef) []sharder.Shard {
 	out := make([]sharder.Shard, 0, len(refs))
 	for _, ref := range refs {
-		out = append(out, sharder.Shard{ID: blob.ID(ref.ShardID), Size: ref.Size, Checksum: ref.Checksum, Encrypted: ref.Encrypted})
+		method := ref.Encryption
+		if method == "" && ref.Encrypted {
+			method = encryption.MethodAES256CTR
+		}
+		stored := ref.StoredSize
+		if stored == 0 {
+			stored = ref.Size
+		}
+		out = append(out, sharder.Shard{
+			ID:         blob.ID(ref.ShardID),
+			Size:       ref.Size,
+			StoredSize: stored,
+			Checksum:   ref.Checksum,
+			Encryption: method,
+		})
 	}
 	return out
 }
@@ -1038,7 +1063,24 @@ func (l *LocalFs) writeShards(ctx context.Context, inode *meta.Inode, r io.Reade
 	var refs []meta.ShardRef
 	for idx, shard := range shards {
 		total += shard.Size
-		refs = append(refs, meta.ShardRef{ShardID: string(shard.ID), Size: shard.Size, Offset: int64(idx), Version: 1, Checksum: shard.Checksum, Encrypted: shard.Encrypted})
+		method := shard.Encryption
+		if method == "" {
+			method = encryption.MethodNone
+		}
+		stored := shard.StoredSize
+		if stored == 0 {
+			stored = shard.Size
+		}
+		refs = append(refs, meta.ShardRef{
+			ShardID:    string(shard.ID),
+			Size:       shard.Size,
+			StoredSize: stored,
+			Offset:     int64(idx),
+			Version:    1,
+			Checksum:   shard.Checksum,
+			Encryption: method,
+			Encrypted:  method != encryption.MethodNone,
+		})
 		_ = l.tracker.Add(ctx, string(shard.ID), 1)
 	}
 	var old []string
@@ -1080,7 +1122,7 @@ func resolveMetaStore(cfg Config) (meta.Store, error) {
 			boltCfg.Path = cfg.BoltMetadataPath
 		}
 		if boltCfg.Path == "" {
-			return nil, fmt.Errorf("localfs: BoltMetadataPath is required when using Bolt store")
+			return nil, xerrors.E(xerrors.KindInvalid, "localfs.resolveMetaStore", "bolt metadata path")
 		}
 		return meta.NewBoltStore(boltCfg)
 	}

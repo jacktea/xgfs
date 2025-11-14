@@ -3,8 +3,9 @@ package blob
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
+
+	"github.com/jacktea/xgfs/pkg/xerrors"
 )
 
 // HybridOptions control hybrid store behaviour.
@@ -23,10 +24,10 @@ type HybridStore struct {
 // NewHybridStore composes primary and secondary blob stores.
 func NewHybridStore(primary Store, secondary Store, opts HybridOptions) (*HybridStore, error) {
 	if primary == nil {
-		return nil, fmt.Errorf("hybrid: primary store required")
+		return nil, xerrors.E(xerrors.KindInvalid, "HybridStore", "primary")
 	}
 	if secondary == nil {
-		return nil, fmt.Errorf("hybrid: secondary store required")
+		return nil, xerrors.E(xerrors.KindInvalid, "HybridStore", "secondary")
 	}
 	return &HybridStore{primary: primary, secondary: secondary, opts: opts}, nil
 }

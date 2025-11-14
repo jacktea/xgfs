@@ -3,7 +3,6 @@ package blob
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jacktea/xgfs/pkg/encryption"
 )
 
 type noopSigner struct{}
@@ -124,13 +125,15 @@ func TestRemoteStoreEncryptedPayload(t *testing.T) {
 		t.Fatalf("new store: %v", err)
 	}
 	key := bytes.Repeat([]byte("k"), 32)
-	if _, _, err := store.Put(ctx, strings.NewReader("secret"), 6, PutOptions{Encrypt: true, Key: key}); err != nil {
+	opts := PutOptions{Encryption: encryption.Options{Method: encryption.MethodAES256CTR, Key: key}}
+	if _, _, err := store.Put(ctx, strings.NewReader("secret"), 6, opts); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	if len(body) != len("secret")+aes.BlockSize {
-		t.Fatalf("expected encrypted payload length %d got %d", len("secret")+aes.BlockSize, len(body))
+	expectedLen := len("secret") + encryption.Overhead(encryption.MethodAES256CTR)
+	if len(body) != expectedLen {
+		t.Fatalf("expected encrypted payload length %d got %d", expectedLen, len(body))
 	}
-	if string(body[aes.BlockSize:]) == "secret" {
+	if string(body[encryption.Overhead(encryption.MethodAES256CTR):]) == "secret" {
 		t.Fatalf("encryption did not modify payload")
 	}
 }

@@ -2,12 +2,50 @@ package fs
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"time"
 )
 
 // ID identifies any inode-backed entity.
-type ID string
+type ID uint64
+
+// String returns the decimal representation of the ID.
+func (id ID) String() string {
+	return strconv.FormatUint(uint64(id), 10)
+}
+
+// MarshalText implements encoding.TextMarshaler so IDs can be used as map keys in JSON.
+func (id ID) MarshalText() ([]byte, error) {
+	return []byte(id.String()), nil
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (id *ID) UnmarshalText(text []byte) error {
+	if len(text) == 0 {
+		*id = 0
+		return nil
+	}
+	s := string(text)
+	if value, err := strconv.ParseUint(s, 10, 64); err == nil {
+		*id = ID(value)
+		return nil
+	}
+	if s == "root" {
+		*id = 1
+		return nil
+	}
+	const prefix = "inode-"
+	if strings.HasPrefix(s, prefix) {
+		if value, err := strconv.ParseUint(s[len(prefix):], 10, 64); err == nil {
+			*id = ID(value)
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid fs.ID %q", s)
+}
 
 // Fs is the top-level filesystem contract implemented by every backend.
 type Fs interface {

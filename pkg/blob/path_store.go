@@ -2,15 +2,14 @@ package blob
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/jacktea/xgfs/pkg/encryption"
+	"github.com/jacktea/xgfs/pkg/xerrors"
 )
 
 // PathStore persists shards on the local filesystem.
@@ -20,8 +19,11 @@ type PathStore struct {
 
 // NewPathStore returns a Store rooted at path.
 func NewPathStore(root string) (*PathStore, error) {
+	if root == "" {
+		return nil, xerrors.E(xerrors.KindInvalid, "PathStore", "root")
+	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, fmt.Errorf("create blob root: %w", err)
+		return nil, xerrors.Wrap(xerrors.KindInternal, "PathStore.mkdir", root, err)
 	}
 	return &PathStore{root: root}, nil
 }
@@ -36,24 +38,15 @@ func (p *PathStore) Put(ctx context.Context, r io.Reader, size int64, opts PutOp
 	tmpName := file.Name()
 	var writer io.Writer = file
 	var bytesWritten int64
-	if opts.Encrypt {
-		if len(opts.Key) != 32 {
-			return "", 0, fmt.Errorf("encrypt: expected 32-byte key, got %d", len(opts.Key))
-		}
-		iv := make([]byte, aes.BlockSize)
-		if _, err := rand.Read(iv); err != nil {
-			return "", 0, err
-		}
-		if _, err := file.Write(iv); err != nil {
-			return "", 0, err
-		}
-		block, err := aes.NewCipher(opts.Key)
+	if opts.Encryption.Enabled() {
+		wrapped, overhead, err := encryption.WrapWriter(file, opts.Encryption)
 		if err != nil {
+			file.Close()
+			os.Remove(tmpName)
 			return "", 0, err
 		}
-		stream := cipher.NewCTR(block, iv)
-		writer = &cipher.StreamWriter{S: stream, W: file}
-		bytesWritten += int64(len(iv))
+		writer = wrapped
+		bytesWritten += overhead
 	}
 	n, err := io.Copy(writer, tee)
 	if err != nil {

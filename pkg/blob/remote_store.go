@@ -3,11 +3,8 @@ package blob
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/md5"
-	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
@@ -23,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jacktea/xgfs/pkg/cache"
+	"github.com/jacktea/xgfs/pkg/encryption"
 )
 
 // RemoteStore persists shards in object storage compatible with S3/OSS/COS.
@@ -114,7 +112,6 @@ func (r *RemoteStore) Put(ctx context.Context, src io.Reader, size int64, opts P
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return "", 0, fmt.Errorf("remote put %s: %s", resp.Status, string(body))
 	}
-	r.cachePut(ID(sum), payload)
 	return ID(sum), int64(plain.Len()), nil
 }
 
@@ -229,25 +226,10 @@ func (r *RemoteStore) cachePut(id ID, data []byte) {
 }
 
 func buildPayload(data []byte, opts PutOptions) ([]byte, error) {
-	if !opts.Encrypt {
+	if !opts.Encryption.Enabled() {
 		return data, nil
 	}
-	if len(opts.Key) != 32 {
-		return nil, fmt.Errorf("encrypt: expected 32-byte key, got %d", len(opts.Key))
-	}
-	iv := make([]byte, aes.BlockSize)
-	if _, err := rand.Read(iv); err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(opts.Key)
-	if err != nil {
-		return nil, err
-	}
-	stream := cipher.NewCTR(block, iv)
-	out := make([]byte, len(iv)+len(data))
-	copy(out, iv)
-	stream.XORKeyStream(out[len(iv):], data)
-	return out, nil
+	return encryption.Encrypt(data, opts.Encryption)
 }
 
 func emptyPayloadHash() string {
