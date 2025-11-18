@@ -8,14 +8,19 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/johannesboyne/gofakes3"
+
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/server/middleware"
+	"github.com/jacktea/xgfs/pkg/server/s3gw"
 	"github.com/jacktea/xgfs/pkg/vfs"
 	"github.com/jacktea/xgfs/pkg/xerrors"
 )
@@ -60,6 +65,8 @@ func (s *Server) router() http.Handler {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/files/", s.handleFiles)
 	mux.HandleFunc("/dirs/", s.handleDirs)
+	mux.HandleFunc("/s3", s.handleS3)
+	mux.HandleFunc("/s3/", s.handleS3)
 	return s.applyMiddleware(mux)
 }
 
@@ -139,6 +146,17 @@ func (s *Server) headFile(ctx context.Context, w http.ResponseWriter, _ *http.Re
 }
 
 func (s *Server) putFile(ctx context.Context, w http.ResponseWriter, r *http.Request, p string) {
+	dir := filepath.Dir(p)
+	if dir != "/" {
+		_, err := s.FS.Stat(ctx, dir)
+		if err != nil {
+			if _, err := s.FS.Mkdir(ctx, dir, fs.MkdirOptions{Parents: true, Mode: 0o755}); err != nil {
+				httpError(w, err)
+				return
+			}
+		}
+	}
+
 	obj, err := s.FS.Create(ctx, p, fs.CreateOptions{Mode: 0o644, Overwrite: true})
 	if err != nil {
 		httpError(w, err)
@@ -188,6 +206,103 @@ func (s *Server) handleDirs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
+	backend := s3gw.NewBackend(s.FS)
+	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/s3"), "/")
+	if trimmed == "" {
+		http.NotFound(w, r)
+		return
+	}
+	parts := strings.Split(trimmed, "/")
+	if len(parts) == 0 || parts[0] != "buckets" {
+		http.NotFound(w, r)
+		return
+	}
+	switch len(parts) {
+	case 1:
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		buckets, err := backend.ListBuckets()
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"buckets": buckets})
+	case 2:
+		bucket := parts[1]
+		switch r.Method {
+		case http.MethodPost:
+			if err := backend.CreateBucket(bucket); err != nil {
+				httpError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodDelete:
+			if err := backend.DeleteBucket(bucket); err != nil {
+				httpError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	case 3:
+		if parts[2] != "uploads" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		bucket := parts[1]
+		limit := parsePositiveInt64(r.URL.Query().Get("max-uploads"), 1000)
+		prefix := parsePrefix(r.URL.Query())
+		marker := parseUploadMarker(r.URL.Query())
+		res, err := backend.ListMultipartUploads(bucket, marker, prefix, limit)
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	case 4:
+		if parts[2] != "uploads" {
+			http.NotFound(w, r)
+			return
+		}
+		bucket := parts[1]
+		uploadID := gofakes3.UploadID(parts[3])
+		object := r.URL.Query().Get("object")
+		if object == "" {
+			http.Error(w, "missing object query parameter", http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			marker := parsePositiveInt(r.URL.Query().Get("part-number-marker"), 0)
+			limit := parsePositiveInt64(r.URL.Query().Get("max-parts"), 1000)
+			res, err := backend.ListParts(bucket, object, uploadID, marker, limit)
+			if err != nil {
+				httpError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, res)
+		case http.MethodDelete:
+			if err := backend.AbortMultipartUpload(bucket, object, uploadID); err != nil {
+				httpError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func cleanPath(p string) string {
@@ -450,6 +565,58 @@ func (s *Server) pageBounds() (def int, max int) {
 		def = max
 	}
 	return def, max
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if payload != nil {
+		_ = json.NewEncoder(w).Encode(payload)
+	}
+}
+
+func parsePositiveInt(value string, def int) int {
+	if value == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(value); err == nil && n >= 0 {
+		return n
+	}
+	return def
+}
+
+func parsePositiveInt64(value string, def int64) int64 {
+	if value == "" {
+		return def
+	}
+	if n, err := strconv.ParseInt(value, 10, 64); err == nil && n >= 0 {
+		return n
+	}
+	return def
+}
+
+func parsePrefix(values url.Values) gofakes3.Prefix {
+	var prefixStr *string
+	if p := values.Get("prefix"); p != "" {
+		prefixStr = &p
+	}
+	var delimStr *string
+	if d := values.Get("delimiter"); d != "" {
+		delimStr = &d
+	}
+	prefix := gofakes3.NewPrefix(prefixStr, delimStr)
+	return prefix
+}
+
+func parseUploadMarker(values url.Values) *gofakes3.UploadListMarker {
+	key := values.Get("key-marker")
+	if key == "" {
+		return nil
+	}
+	return &gofakes3.UploadListMarker{
+		Object:   key,
+		UploadID: gofakes3.UploadID(values.Get("upload-id-marker")),
+	}
 }
 
 func (s *Server) applyMiddleware(handler http.Handler) http.Handler {

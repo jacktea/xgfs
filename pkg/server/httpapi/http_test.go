@@ -13,9 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johannesboyne/gofakes3"
+
 	"github.com/jacktea/xgfs/pkg/fs"
 	"github.com/jacktea/xgfs/pkg/localfs"
 	"github.com/jacktea/xgfs/pkg/server/middleware"
+	"github.com/jacktea/xgfs/pkg/server/s3gw"
 	"github.com/jacktea/xgfs/pkg/vfs"
 )
 
@@ -252,6 +255,93 @@ func TestHTTPAPIPatchChmod(t *testing.T) {
 	}
 	if inode.Metadata().Mode != 0o600 {
 		t.Fatalf("expected mode 0600 got %o", inode.Metadata().Mode)
+	}
+}
+
+func TestHTTPAPIS3Endpoints(t *testing.T) {
+	ctx := context.Background()
+	backend, err := localfs.New(ctx, localfs.Config{BlobRoot: t.TempDir(), CacheEntries: 8})
+	if err != nil {
+		t.Fatalf("new backend: %v", err)
+	}
+	srv := &Server{FS: vfs.New(backend, vfs.Options{})}
+	handler := srv.router()
+
+	// Create bucket via HTTP.
+	req := httptest.NewRequest(http.MethodPost, "/s3/buckets/photos", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create bucket status: %d", rr.Code)
+	}
+
+	// List buckets.
+	req = httptest.NewRequest(http.MethodGet, "/s3/buckets", nil)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list buckets: %d", rr.Code)
+	}
+	var bucketResp struct {
+		Buckets []struct {
+			Name string `json:"Name"`
+		} `json:"buckets"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&bucketResp); err != nil {
+		t.Fatalf("decode buckets: %v", err)
+	}
+	if len(bucketResp.Buckets) != 1 || bucketResp.Buckets[0].Name != "photos" {
+		t.Fatalf("unexpected buckets: %+v", bucketResp.Buckets)
+	}
+
+	// Prepare multipart upload using backend directly.
+	gw := s3gw.NewBackend(srv.FS)
+	uploadID, err := gw.CreateMultipartUpload("photos", "object.txt", nil)
+	if err != nil {
+		t.Fatalf("create multipart: %v", err)
+	}
+	body := bytes.NewBufferString("hello world")
+	if _, err := gw.UploadPart("photos", "object.txt", uploadID, 1, int64(body.Len()), bytes.NewReader(body.Bytes())); err != nil {
+		t.Fatalf("upload part: %v", err)
+	}
+
+	// List uploads via HTTP.
+	req = httptest.NewRequest(http.MethodGet, "/s3/buckets/photos/uploads", nil)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list uploads: %d", rr.Code)
+	}
+	var listUploads gofakes3.ListMultipartUploadsResult
+	if err := json.NewDecoder(rr.Body).Decode(&listUploads); err != nil {
+		t.Fatalf("decode uploads: %v", err)
+	}
+	if len(listUploads.Uploads) != 1 || listUploads.Uploads[0].Key != "object.txt" {
+		t.Fatalf("unexpected uploads: %+v", listUploads.Uploads)
+	}
+
+	// List parts via HTTP.
+	path := fmt.Sprintf("/s3/buckets/photos/uploads/%s?object=object.txt", uploadID)
+	req = httptest.NewRequest(http.MethodGet, path, nil)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list parts: %d", rr.Code)
+	}
+	var parts gofakes3.ListMultipartUploadPartsResult
+	if err := json.NewDecoder(rr.Body).Decode(&parts); err != nil {
+		t.Fatalf("decode parts: %v", err)
+	}
+	if len(parts.Parts) != 1 || parts.Parts[0].PartNumber != 1 {
+		t.Fatalf("unexpected parts: %+v", parts.Parts)
+	}
+
+	// Abort upload via HTTP.
+	req = httptest.NewRequest(http.MethodDelete, path, nil)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("abort upload: %d", rr.Code)
 	}
 }
 

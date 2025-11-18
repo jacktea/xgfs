@@ -185,9 +185,9 @@ func (l *LocalFs) Stat(ctx context.Context, p string) (fs.Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	if inode.Type != meta.TypeFile {
-		return nil, fs.ErrNotSupported
-	}
+	// if inode.Type != meta.TypeFile {
+	// 	return nil, fs.ErrNotSupported
+	// }
 	return &localObject{fs: l, inode: inode, path: cleanPath(p)}, nil
 }
 
