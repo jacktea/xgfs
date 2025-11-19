@@ -7,7 +7,6 @@ import (
 	"os"
 	"path"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jacktea/xgfs/pkg/cache"
@@ -31,11 +30,9 @@ type Options struct {
 // on top of any backend fs.Fs. Phase 2 keeps behaviour as a passthrough so
 // callers can switch dependencies without breaking compatibility.
 type FS struct {
-	backend fs.Fs
-	posix   PosixFs
-	opts    Options
-
-	cacheMu   sync.RWMutex
+	backend   fs.Fs
+	posix     PosixFs
+	opts      Options
 	metaCache *cache.Cache
 }
 
@@ -519,9 +516,7 @@ func (f *FS) cacheGet(path string) (fs.Metadata, bool, bool) {
 	if f.metaCache == nil {
 		return fs.Metadata{}, false, false
 	}
-	f.cacheMu.RLock()
 	value, ok := f.metaCache.Get(path)
-	f.cacheMu.RUnlock()
 	if !ok {
 		return fs.Metadata{}, false, false
 	}
@@ -535,18 +530,14 @@ func (f *FS) cachePut(path string, meta fs.Metadata, isDir bool) {
 	if f.metaCache == nil {
 		return
 	}
-	f.cacheMu.Lock()
 	f.metaCache.Set(path, metaEntry{meta: meta, isDir: isDir})
-	f.cacheMu.Unlock()
 }
 
 func (f *FS) cacheDelete(path string) {
 	if f.metaCache == nil {
 		return
 	}
-	f.cacheMu.Lock()
 	f.metaCache.Delete(path)
-	f.cacheMu.Unlock()
 }
 
 type metaEntry struct {
